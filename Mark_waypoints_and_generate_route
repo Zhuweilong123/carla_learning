@@ -1,0 +1,38 @@
+import carla
+from agents.navigation.global_route_planner import GlobalRoutePlanner
+from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
+import numpy as np
+
+client = carla.Client("localhost", 2000)
+client.set_timeout(10)
+
+world = client.load_world('Town01')
+
+distance = 10
+# graph, id_map, road_id_to_edge = grp._build_graph()
+spawn_points = world.get_map().generate_waypoints(distance)
+
+i = 0
+for w in spawn_points:
+    mark = str((w.road_id, (np.round(w.transform.location.x, 2),
+                            np.round(w.transform.location.y, 2), np.round(w.transform.location.z, 2))))
+    # mark the road_id and location coordinate in the carla map.
+    if i % 10 == 0:
+        world.debug.draw_string(w.transform.location, mark, draw_shadow=False,
+                                color=carla.Color(r=255, g=0, b=0), life_time=120.0,
+                                persistent_lines=True)
+    else:
+        world.debug.draw_string(w.transform.location, mark, draw_shadow=False,
+                                color = carla.Color(r=0, g=0, b=255), life_time=1000.0,
+                                persistent_lines=True)
+    i += 1
+    
+    
+#  use GlobalRoutePlanner to generate a route
+amap = world.get_map()
+dao = GlobalRoutePlannerDAO(amap, 2)
+grp = GlobalRoutePlanner(dao)
+grp.setup()
+a = carla.Location(spawn_points[10].transform.location)  # choose a start point
+b = carla.Location(spawn_points[100].transform.location)  # choose a destination point
+w1 = grp.trace_route(a, b)  # generate a route
