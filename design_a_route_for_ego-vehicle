@@ -1,0 +1,127 @@
+# 实现了在给定两个坐标点之间的路径生成
+# 车辆沿着生成的路径进行运动
+# 但是现在车辆遵守交通规则，加入其他自由车辆的化会产生碰撞
+import carla
+from agents.navigation.global_route_planner import GlobalRoutePlanner
+from agents.navigation.global_route_planner_dao import GlobalRoutePlannerDAO
+from agents.navigation.controller import VehiclePIDController
+import math
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+running = True
+# carla是客户服务器架构，环境属于服务器端，通过python的API进行控制属于客户端。
+# client是和carla环境交互的唯一入口，为了防止由于网络原因带来的拥塞，还可以设置这个客户端的超时时间
+client = carla.Client("localhost", 2000)
+client.set_timeout(10)
+
+# 对象创建好了之后，在对象中添加需要的环境中的地图
+world = client.load_world('Town01')
+amap = world.get_map()
+dao = GlobalRoutePlannerDAO(amap, 2)
+grp = GlobalRoutePlanner(dao)
+grp.setup()
+way_points = world.get_map().generate_waypoints(10)
+spawn_points = world.get_map().get_spawn_points()  # 获取地图中的所有可用生成点
+a = carla.Location(spawn_points[10].location)  # carla.location 作用是将一个三维坐标点（x,y,z)转化为Carla中的坐标
+# b = carla.Location(way_points[128].transform.location)
+b = carla.Location(spawn_points[200].location)
+w1 = grp.trace_route(a, b)  # 生成的路径点都是way_points,包含道路信息
+i = 0
+for w in w1:
+    mark = str(w[0].road_id)
+    if i % 10 == 0:
+        world.debug.draw_string(w[0].transform.location, mark, draw_shadow=False,
+                                color=carla.Color(r=255, g=0, b=0), life_time=120.0,
+                                persistent_lines=True)
+    else:
+        world.debug.draw_string(w[0].transform.location, mark, draw_shadow=False,
+                                color = carla.Color(r=0, g=0, b=255), life_time=1000.0,
+                                persistent_lines=True)
+    i += 1
+
+
+model3_bp = world.get_blueprint_library().find('vehicle.tesla.model3')  # 获取特斯拉model3车型
+model3_bp.set_attribute('color', '0,0,255')   # 设定为白色
+
+model3_spawn_point = spawn_points[10]
+
+model3_actor = world.spawn_actor(model3_bp, model3_spawn_point)  # 生成车辆时不能用w1中的点，因为生成的路径点中z均为零，会产生冲突
+# 实际产生的生成点z为0.03，这表示汽车是在三维空间中的实体，车的中心点不在地面
+
+picked_spawn_points = [model3_spawn_point]
+
+# 如果需要添加其他车辆，将下面的代码取消注释即可
+# 利用TM生成场景中的自由车辆，模拟复杂的交通环境
+# NUMBER_OF_VEHICLES = 50  # 确定想要模拟的自由车辆数
+#
+# vehicle_bps = world.get_blueprint_library().filter('vehicle.*.*')  # 获取车型
+#
+# vehicle_bps = [x for x in vehicle_bps if int(x.get_attribute('number_of_wheels')) == 4]
+#
+# vehicle_list = []  # 将生成的所有车辆加入车辆列表
+#
+# for i in range(NUMBER_OF_VEHICLES):  # 逐个生成自由车辆
+#     point = spawn_points[i]
+#     vehicle_bp = np.random.choice(vehicle_bps)  # 随机选择一个可用点
+#     try:  # try语句的好处是当前某个语句执行不成功，并不会将整个程序卡死，而是跳过当前执行的语句通过except反馈执行情况，然后继续执行其他程序
+#         vehicle = world.spawn_actor(vehicle_bp, point)  # 生成车辆
+#         picked_spawn_points.append(point)
+#         vehicle_list.append(vehicle)  # 将这些车辆都加入车辆列表中
+#     except:
+#         print('failed')  # 如果车辆生成失败，报错
+#         pass
+#
+# tm = client.get_trafficmanager()  # 首先创造TM对象
+# tm.global_percentage_speed_difference(10.0)  # 设置TM中车辆的目标速度和限制速度差10%，也就是最大是限速的90%
+# tm_port = tm.get_port()  # 返回交通管理器连接的端口
+# for v in vehicle_list:
+#     v.set_autopilot(True, tm_port)  # 通过端口将生成的自由车辆和交通管理器TM绑定
+#     tm.ignore_lights_percentage(v, 0)  # 设置TM中当前车辆是否遵守交通规则
+#     tm.distance_to_leading_vehicle(v, 0.5)  # 设置TM中每个车辆头和前车尾需要保持的距离，单位米
+#     tm.vehicle_percentage_speed_difference(v, -20)  # 告诉车辆目标速度为超速20%
+
+custom_controller = VehiclePIDController(model3_actor,
+                                         args_lateral = {'K_P': 1.95, 'K_D': 0.02, 'K_I': 0.07, 'dt': 0.05},
+                                         args_longitudinal = {'K_P': 1, 'K_D': 0.0, 'K_I': 0.05, 'dt': 0.05})
+# args_lateral和args_longitudinal是横向和纵向的控制逻辑，其其中的dt是运动控制间隙，越小越接近于实时控制，实际情况中控制调整的时隙不会非常小
+# 默认dt是0.03e
+
+DIS = math.sqrt((w1[0][0].transform.location.x - w1[1][0].transform.location.x) ** 2
+                + (w1[0][0].transform.location.y - w1[1][0].transform.location.y) ** 2)  # 计算轨迹相邻点之间的距离
+print("The distance between two adjacent points in route:", DIS)
+i = 0
+way = w1[0][0]
+while True:
+
+    # 设定一个观察者视角
+    spectator = world.get_spectator()
+    transform = model3_actor.get_transform()
+    spectator.set_transform(carla.Transform(transform.location + carla.Location(z=80), carla.Rotation(pitch=-90)))
+
+    desiredSpeed = 50  # 运行速度
+    vehicle_loc = model3_actor.get_location()  # 获取车辆的当前位置
+    dist = math.sqrt((way.transform.location.x - vehicle_loc.x) ** 2 + (way.transform.location.y - vehicle_loc.y) ** 2)
+    # 计算当前车辆和目标点的距离
+    control = custom_controller.run_step(desiredSpeed, way)
+    model3_actor.apply_control(control)
+
+    if i == (len(w1) - 1):
+        control = custom_controller.run_step(0, w1[-1][0])
+        model3_actor.apply_control(control)
+        print("last waypoint reached")
+        break
+    if (dist < 1.5):
+        print("The distance is less than  ", dist)
+        # Get next way point only when the distance between our vehicle and the current
+        # waypoint is less than x meters
+        control = custom_controller.run_step(desiredSpeed, way)  # run_step函数的作用是让车辆以一定的速度朝着目标点运动
+        # 我们也可以认为目标点是在引导车辆运动，车辆运动控制（加速，转向等）是由custom_controller来完成的
+        # 如果我们想让车辆根据一个给定的路线进行运动，则我们需要不断的用轨迹中的点进行引导。因此需要不断地更新运动的目标点
+        # 更新目标点的条件是什么呢？从别人的代码中学习到了根据车辆当前位置与目标点的距离来判断是否更新下一个目标点。
+        # 当车辆距离当前的目标点距离小于阈值时，我们认为车辆即将到达该店，即未来的一段时间内该店会失去引导效果，因此需要更新该店后面的一点进行引导，
+        # 使汽车能够不断地跟随预定的轨迹运动.因此阈值的设定就直接影响车辆运动的平滑性，尤其在路口进行转向的时候
+        # 阈值设定可以根据两个相邻生成点之间的直线距离
+        model3_actor.apply_control(control)
+        i = i + 1
+        way = w1[i][0]
