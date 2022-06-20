@@ -592,4 +592,3 @@ def predict_block(ego_vehicle, ts=0.1):
     fi = fi + fi_dao * ts
 
     return x, y, fi
-
