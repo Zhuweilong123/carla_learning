@@ -3,7 +3,7 @@
 # @Time    : 2022-05-06,15:27
 # @File    : planner_utiles.py
 """
-规划和控制要用的一些通用函数
+控制和规划要用的一些通用函数
 """
 import math
 import numpy as np
@@ -24,6 +24,26 @@ def Vector_fun(loc_1: carla.Location, loc_2: carla.Location):
     delt_z = loc_2.z - loc_1.z
     norm = np.linalg.norm([delt_x, delt_y, delt_z]) + np.finfo(float).eps  # 后面一项不让norm为零
     return np.round([delt_x / norm, delt_y / norm, delt_z / norm], 4)  # 保留4位小数
+
+
+def waypoint_list_2_target_path(pathway):
+    """
+    将由路点构成的路径转化为（x, y, theta, k）的形式
+    :param pathway: 【waypoint0, waypoint1, ...】
+    :return: [(x0, y0, theta0, k0), ...]
+    """
+    target_path = []
+    w = None  # type: carla.Waypoint
+    xy_list_ori = []
+    for w in pathway:
+        x = w[0].transform.location.x
+        y = w[0].transform.location.y
+        xy_list_ori.append((x, y))
+    theta_list, kappa_list = cal_heading_kappa(xy_list_ori)
+    # self._target_path = smooth_reference_line(xy_list_ori)  # 对生成的原始轨迹进行平滑,这里只是做了个实验
+    for i in range(len(theta_list)):
+        target_path.append((xy_list_ori[i][0], xy_list_ori[i][1], theta_list[i], kappa_list[i]))
+    return target_path
 
 
 def find_match_points(xy_list: list, frenet_path_node_list: list, is_first_run: bool, pre_match_index: int):
@@ -50,7 +70,7 @@ def find_match_points(xy_list: list, frenet_path_node_list: list, is_first_run: 
     project_node_list = []  # 最终长度和input_xy_length应该相同
 
     if is_first_run is True:
-        for index_xy in range(input_xy_length):  # 为每一个点寻找匹配点
+        for index_xy in range(pre_match_index, input_xy_length):  # 为每一个点寻找匹配点
             x, y = xy_list[index_xy]
             start_index = 0
             # 用increase_count记录distance连续增大的次数，避免多个局部最小值的干扰
@@ -194,25 +214,29 @@ def cal_heading_kappa(frenet_path_xy_list: list):
     return list(theta), list(k)
 
 
-def sampling(match_point_index: int, frenet_path_node_list: list):
+def sampling(match_point_index: int, frenet_path_node_list: list, back_length=10, forward_length=50):
     """
     根据匹配点确定局部参考线，用于后平滑和局部规划使用
     :param match_point_index: 当前匹配点在frenet曲线（全局离散路径）中的索引
     :param frenet_path_node_list: frenet曲线
+    :param back_length: 投影点向后采样点数
+    :param forward_length: 投影点向前采样点数
+
     :return: list类型， local_frenet_path = [node0, node1, node2, ...], node0 = (x0, y0, heading0, kappa0)
-    采样的规则是，在匹配点之前的30个点和匹配点之后的150个点
+    采样的规则是，在匹配点之前的30个点和匹配点之后的150个点,这个可以根据实际调整，做到精确和速度的平衡就好
     如果前向不够，则向后增加点；如果后向不够，则向前增加点。保持总长度为181，为了后面平滑算法统一处理
     """
     local_frenet_path = []
-    back_length = 30
-    forward_length = 150
-    if match_point_index < 30:
+    back_length = 10
+    forward_length = 50
+    length_sum = back_length + forward_length
+    if match_point_index < back_length:
         back_length = match_point_index
-        forward_length = 180 - back_length
+        forward_length = length_sum - back_length
 
-    if (len(frenet_path_node_list) - match_point_index) - 1 < 150:
+    if (len(frenet_path_node_list) - match_point_index) - 1 < forward_length:
         forward_length = len(frenet_path_node_list) - match_point_index - 1
-        back_length = 180 - forward_length
+        back_length = length_sum - forward_length
 
     local_frenet_path = frenet_path_node_list[match_point_index - back_length: match_point_index] \
                         + frenet_path_node_list[match_point_index: match_point_index + forward_length + 1]
@@ -221,11 +245,13 @@ def sampling(match_point_index: int, frenet_path_node_list: list):
 
 
 def smooth_reference_line(local_frenet_path_xy: list,
-                          w_cost_smooth=0.3, w_cost_length=0.3, w_cost_ref=0.4,
+                          w_cost_smooth=0.4, w_cost_length=0.3, w_cost_ref=0.3,
                           x_thre=0.2, y_thre=0.2):
     """
     对原始参考线进行平滑处理,采用二次规划, 平滑后再计算theta和kappa
-    :param local_frenet_path_xy: [(x_ref0, y_ref0), (x_ref1, y_ref1), ...]
+    :param local_frenet_path_xy: 可以是[(x_ref0, y_ref0), (x_ref1, y_ref1), ...]，
+    也可以是[(x_ref0, y_ref0，theta0, kappa0), (x_ref1, y_ref1, theta1, kappa1), ...],
+    二次规划只是对离散曲线进行平滑，索引索引的是元组的前两个元素x，y，规划后再计算theta和曲率
     :param w_cost_smooth: 平滑代价权重
     :param w_cost_length: 紧凑代价权重
     :param w_cost_ref: 几何相似代价权重
@@ -305,8 +331,8 @@ def smooth_reference_line(local_frenet_path_xy: list,
 
     f = -2 * w_cost_ref * x_ref
     # 将约束转化为矩阵形式
-    G = np.concatenate((np.identity(2 * n), np.identity(2 * n)))  # （4n, 2n）
-    h = np.concatenate((ub, lb))  # (4n, 1)
+    G = np.concatenate((np.identity(2 * n), -np.identity(2 * n)))  # （4n, 2n）
+    h = np.concatenate((ub, -lb))  # (4n, 1)
     cvxopt.solvers.options['show_progress'] = False  # 程序没有问题之后不再输出中间过程
     # 计算时要将输入转化为cvxopt.matrix
     # 该方法返回值是一个字典类型，包含了很多的参数，其中x关键字对应的是优化后的解
@@ -334,7 +360,6 @@ def match_projection_points(xy_list: list, frenet_path_node_list: list):
     project_node_list 投影点的位置信息， project_node_list = [(x_p0, y_p0, heading_p0, kappa_p0), ...]
     """
 
-    i = -1  # 提前定义一个变量用于遍历曲线上的点
     input_xy_length = len(xy_list)
     frenet_path_length = len(frenet_path_node_list)
 
@@ -387,10 +412,10 @@ def match_projection_points(xy_list: list, frenet_path_node_list: list):
     return list(match_point_index_list), project_node_list
 
 
-def cal_projection_s_fun(local_path_xy_opt: list, match_index_list: list, xy_list: list, s_map: list):
-    """
-    计算若干点的投影对应的s
-    :param local_path_xy_opt: 优化后的参考线[(x, y, theta, kappa), ...]
+def cal_projection_s_fun(local_path_opt: list, match_index_list: list, xy_list: list, s_map: list):
+    """已验证
+    计算若干点的投影对应的s,
+    :param local_path_opt: 优化后的参考线[(x, y, theta, kappa), ...]
     :param match_index_list: 给定点在参考线上点的索引列表
     :param xy_list:  给定点的坐标【（x, y）, ...】
     :param s_map: 参考s_map
@@ -398,7 +423,7 @@ def cal_projection_s_fun(local_path_xy_opt: list, match_index_list: list, xy_lis
     """
     projection_s_list = []
     for i in range(len(match_index_list)):
-        x, y, theta, kappa = local_path_xy_opt[match_index_list[i]]
+        x, y, theta, kappa = local_path_opt[match_index_list[i]]
         d_v = np.array([xy_list[i][0] - x, xy_list[i][1] - y])  # 匹配点指向给定点的向量
         tou_v = np.array([math.cos(theta), math.sin(theta)])  # 切线方向单位向量
         projection_s_list.append(s_map[match_index_list[i]] + np.dot(d_v, tou_v))  # np.dot(d_v, tou_v)是有正负号的
@@ -406,58 +431,165 @@ def cal_projection_s_fun(local_path_xy_opt: list, match_index_list: list, xy_lis
     return projection_s_list
 
 
-def cal_s_map_fun(local_path_xy_opt: list, origin_match_index: int, origin_xy: tuple):
+def cal_s_map_fun(local_path_opt: list, origin_xy: tuple):
     """
     计算参考线上每个节点与s的映射关系, 以车辆当前投影点为原点，不是以参考线的起点。, s就是弧长的，用折线来拟合的
-    :param local_path_xy_opt: 优化后的参考线[(x, y, theta, kappa), ...]
-    :param origin_match_index: 车辆位置对应的匹配点
+    :param local_path_opt: 优化后的参考线[(x, y, theta, kappa), ...]
     :param origin_xy: 车辆当前的位置
     :return: s_map, list类型和输入的参考线长度相同
     """
+    # 计算以车辆当前位置投影点为起点的s_map
+    origin_match_index, _ = match_projection_points([origin_xy], local_path_opt)  # 通过
+    # 车辆定位位置，计算其在参考线上的匹配点索引和投影点信息，match_projection_points处理的是一系列点的列表，
+    # 因此输入要为列表形式，输出也是列表形式，但是里面只有一个元素，因此索引第一位就行了
+    origin_match_index = origin_match_index[0]
     ref_s_map = [0]
     # 先计算以参考线起点为起点的ref_s_map
-    for i in range(1, len(local_path_xy_opt)):
-        s = math.sqrt((local_path_xy_opt[i][0]-local_path_xy_opt[i-1][0])**2
-                      + (local_path_xy_opt[i][1]-local_path_xy_opt[i-1][1])**2) + ref_s_map[-1]
+    for i in range(1, len(local_path_opt)):
+        s = math.sqrt((local_path_opt[i][0] - local_path_opt[i - 1][0]) ** 2
+                      + (local_path_opt[i][1] - local_path_opt[i - 1][1]) ** 2) + ref_s_map[-1]
         ref_s_map.append(s)
     # 然后算出在车辆当前位置投影点相对于参考线起点的s, 记为s0
-    s0 = cal_projection_s_fun(local_path_xy_opt, [origin_match_index], [origin_xy], ref_s_map)
+    s0 = cal_projection_s_fun(local_path_opt, [origin_match_index], [origin_xy], ref_s_map)
     # ref_s_map 每一项都减去s0，这样就得到了所有匹配点相对于车辆投影点的s映射
     s_map = np.array(ref_s_map) - s0[0]
     return list(s_map)
 
 
-def cal_s_l_fun(obs_xy_list: list, local_path_xy_opt: list, origin_xy: tuple):
-    """
-    将障碍物的坐标转化为S-L坐标
+def cal_s_l_fun(obs_xy_list: list, local_path_opt: list, s_map: list):
+    """已验证
+    这是坐标转换的通用模块
+    坐标转换第一部分，计算S,L
+    将障碍物的坐标转化为S-L坐标,也不一定必须是障碍物，可以使任何要坐标转化的对象
     基本步骤是
     0.确定车辆当前位置的投影作为坐标原点
     1.确定每个点的在参考线上的匹配点和投影点；
     2.计算S,S是投影点距离规划起点的弧长，就是连接这些离散点的折线长度；
     3.计算L,即障碍物与投影点的距离
     :param obs_xy_list: 给定一些障碍物对应点点的坐标
-    :param local_path_xy_opt: 优化后的参考线【(x_opt0, y_opt0, theta_0, kappa_0), ... 】
-    :param origin_xy: 车辆当前的位置
-    :return:
+    :param local_path_opt: 优化后的参考线【(x_opt0, y_opt0, theta_0, kappa_0), ... 】
+    # :param origin_xy: 车辆当前的位置
+    :param s_map:
+    :return:  输出s_list 和 l_list
     """
-    # 计算以车辆当前位置投影点为起点的s_map
-    origin_match_index, origin_projection_point = match_projection_points([origin_xy], local_path_xy_opt)  # 通过
-    # 车辆定位位置，计算其在参考线上的匹配点索引和投影点信息，match_projection_points处理的是一系列点的列表，
-    # 因此输入要为列表形式，输出也是列表形式，但是里面只有一个元素，因此索引第一位就行了
-
-    s_map = cal_s_map_fun(local_path_xy_opt, origin_match_index[0], origin_xy)  # 得到以车辆当前位置为起点的s_map
+    # s_map = cal_s_map_fun(local_path_opt, origin_xy)  # 得到以车辆当前位置为起点的s_map
 
     # 计算这些障碍物点在当期参考线中匹配点的索引和投影点信息
-    match_index_list, projection_list = match_projection_points(obs_xy_list, local_path_xy_opt)
+    match_index_list, projection_list = match_projection_points(obs_xy_list, local_path_opt)
 
-    s_list = cal_projection_s_fun(local_path_xy_opt, match_index_list, obs_xy_list, s_map)  # 得到障碍点的s
+    s_list = cal_projection_s_fun(local_path_opt, match_index_list, obs_xy_list, s_map)  # 得到障碍点的s
 
-    # 下面是计算l
+    # 下面是计算l, 这里计算l和下面一个计算导数的函数有重复，以后可以考虑删除
     l_list = []
 
     for i in range(len(obs_xy_list)):
+        pro_x, pro_y, theta, kappa = projection_list[i]  # 投影点的信息
+        n_r = np.array([-math.sin(theta), math.cos(theta)])  # 投影点的单位法向量***************************************
+        x, y = obs_xy_list[i]  # 待投影的位置
+        r_h = np.array([x, y])  # 车辆实际位置的位矢
+        r_r = np.array([pro_x, pro_y])  # 投影点的位置矢
+        l_list.append(np.dot(r_h - r_r, n_r))  # UE4定义的是左手系，所以在车辆左侧的为负值
+
+    return s_list, l_list
+
+
+def cal_s_l_deri_fun(xy_list: list, V_xy_list: list, a_xy_list: list, local_path_xy_opt: list, origin_xy: tuple):
+    """
+    坐标转换第二部分，计算S对时间的导数，以及L对弧长的导数derivative
+    基本步骤是
+    0.确定车辆当前位置的投影作为坐标原点
+    1.确定每个点的在参考线上的匹配点和投影点；
+    2.计算S,S是投影点距离规划起点的弧长，就是连接这些离散点的折线长度；
+    3.计算L,即障碍物与投影点的距离
+    :param V_xy_list: velocity
+    :param a_xy_list: acceleration
+    :param xy_list: 给定一些对应点的坐标
+    :param local_path_xy_opt: 优化后的参考线【(x_opt0, y_opt0, theta_0, kappa_0), ... 】
+    :param origin_xy: 车辆当前的位置
+    :return:  坐标变换的七个变量，每个对应一个列表
+    """
+    # 计算这些障碍物点在当期参考线中匹配点的索引和投影点信息
+    match_index_list, projection_list = match_projection_points(xy_list, local_path_xy_opt)
+
+    l_list = []  # store l
+    dl_list = []  # store the derivative of l, dl/dt
+    ds_list = []  # store the derivative of s, ds/dt
+    ddl_list = []  # store the  second order derivative of l, d(dl/dt)/dt
+    l_ds_list = []  # store the arc differential of l, dl/ds
+    dds_list = []  # store the second order derivative of s, d(ds/dt)/dt
+    l_dds_list = []  # store the second order arc differential of l, d(dl/ds)/ds
+    for i in range(len(xy_list)):
         x, y, theta, kappa = projection_list[i]  # 投影点的信息
-        n_r = np.array([-math.sin(theta), math.cos(theta)])  # 投影点的单位法向量
+        nor_r = np.array([-math.sin(theta), math.cos(theta)])  # 投影点的单位法向量  **************************************
+        tou_r = np.array([math.cos(theta), math.sin(theta)])  # 投影点的单位切向量
         r_h = np.array([origin_xy[0], origin_xy[1]])  # 车辆实际位置的位矢
         r_r = np.array([x, y])  # 投影点的位置矢
-        l_list.append(np.dot(r_h-r_r, n_r))
+
+        """1.calculate l"""
+        l = np.dot(r_h - r_r, nor_r)
+        l_list.append(l)
+
+        """2.calculate dl"""
+        Vx, Vy = V_xy_list[i]
+        V_h = np.array([Vx, Vy])  # 速度矢量
+        dl = np.dot(V_h, nor_r)
+        dl_list.append(dl)  # l对时间的导数
+
+        """3.计算s对时间的导数"""
+        ds = np.dot(V_h, tou_r) / (1 - kappa * l_list[i])
+        ds_list.append(ds)
+
+        """4.计算l对时间的二阶导数"""
+        ax, ay = a_xy_list[i]
+        a_h = np.array([ax, ay])
+        ddl = np.dot(a_h, nor_r) - kappa * (1 - kappa * l) * (ds ** 2)
+        ddl_list.append(ddl)
+
+        """5.calculate the arc differential of l"""
+        if abs(ds) < 1e-6:
+            l_ds = 0
+        else:
+            l_ds = dl_list[i] / ds
+        l_ds_list.append(l_ds)
+
+        """6.calculate the second order derivative of s"""
+        ax, ay = a_xy_list[i]
+        a_h = np.array([ax, ay])
+        kappa_ds = 0  # dk/ds, for simplicity, make it to be zero
+        dds = (np.dot(a_h, tou_r) + 2 * (ds ** 2 * kappa * l_ds) + ds ** 2 * kappa_ds * l) / (1 - kappa * l)
+        dds_list.append(dds)
+
+        """7.the second order derivative of s"""
+        if abs(ds) < 1e-6:
+            l_dds = 0
+        else:
+            l_dds = (ddl - l_ds * dds) / (ds ** 2)
+        l_dds_list.append(l_dds)
+
+    return l_list, dl_list, ds_list, ddl_list, l_ds_list, dds_list, l_dds_list
+
+
+def predict_block(ego_vehicle, ts=0.1):
+    """
+    预测车辆在下个规划周期的位置和航向
+    :param ego_vehicle:
+    :param ts: 预测时间长度
+    :return: 返回车辆的直角坐标x, y和航向信息
+    """
+    vehicle_loc = ego_vehicle.get_location()
+    x, y = vehicle_loc.x, vehicle_loc.y
+    fi = ego_vehicle.get_transform().rotation.yaw*(math.pi/180)  # 车身横摆角，车轴和x轴的夹角
+    V = ego_vehicle.get_velocity()  # 航向角是车速与x轴夹角
+    V_length = math.sqrt(V.x*V.x + V.y*V.y + V.z*V.z)
+    beta = math.atan2(V.y, V.x) - fi  # 质心侧偏角，车速和车轴之间的夹角
+    # print("beta", beta, "fi", fi)
+    V_y = V_length*math.sin(beta)  # 车速在车身坐标系下的分量
+    V_x = V_length*math.cos(beta)
+    # print("Vx", Vx, "Vy", Vy)
+    x = x + V_x * ts * math.cos(fi) - V_y * ts * math.sin(fi)
+    y = y + V_y * ts * math.cos(fi) + V_x * ts * math.sin(fi)
+    fi_dao = ego_vehicle.get_angular_velocity().z * (math.pi / 180)
+    fi = fi + fi_dao * ts
+
+    return x, y, fi
+
