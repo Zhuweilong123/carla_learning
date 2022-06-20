@@ -43,12 +43,12 @@ from collections import deque
 
 
 class Lateral_LQR_controller(object):
-    def __init__(self, ego_vehicle, vehicle_para, pathway):
+    def __init__(self, ego_vehicle, vehicle_para, pathway_xy_theta_kappa):
         self._vehicle_para = vehicle_para
         self._vehicle = ego_vehicle  # type: carla.Vehicle
         self._vehicle_state = None
         self._vehicle_Vx = 0
-        self._target_path = []
+        self._target_path = pathway_xy_theta_kappa
         self.A = np.zeros(shape=(4, 4), dtype="float64")
         self.B = np.zeros(shape=(4, 1), dtype="float64")
         self.K = None
@@ -63,23 +63,20 @@ class Lateral_LQR_controller(object):
         self.y_pro = 0
 
         # 初始化
-        self.waypoint_list_2_target_path(pathway)
+        # self.xy_list_2_target_path(pathway_xy)
         self.cal_vehicle_info()
         self.cal_A_B_fun()
 
-    def waypoint_list_2_target_path(self, pathway):
+    def xy_list_2_target_path(self, pathway_xy_list):
         """
-        将由路点构成的路径转化为（x, y, theta, k）的形式
-        :param pathway: 【waypoint0, waypoint1, ...】
+        将由坐标构成的路径转化为（x, y, theta, k）的形式
+        :param pathway_xy_list: 【x0, y0, (x1, y1), ...】
         :return: [(x0, y0, theta0, k0), ...]
         """
-        w = None  # type: carla.Waypoint
-        xy_list_ori = []
-        for w in pathway:
-            x = w[0].transform.location.x
-            y = w[0].transform.location.y
-            xy_list_ori.append((x, y))
-        self._target_path = smooth_reference_line(xy_list_ori)  # 对生成的原始轨迹进行平滑
+        theta_list, kappa_list = cal_heading_kappa(pathway_xy_list)
+        # self._target_path = smooth_reference_line(xy_list_ori)  # 对生成的原始轨迹进行平滑,这里只是做了个实验
+        for i in range(len(theta_list)):
+            self._target_path.append((pathway_xy_list[i][0], pathway_xy_list[i][1], theta_list[i], kappa_list[i]))
 
     def cal_vehicle_info(self):
         """
@@ -146,7 +143,7 @@ class Lateral_LQR_controller(object):
         P_pre = Q
         max_itr = 5000
         eps = 0.1
-        ts = 0.1
+        ts = 0.1  # 连续lqr离散化的时间间隔
         # 连续lqr离散化的时候， 系数矩阵相应发生变化
         A = np.matmul(np.linalg.inv(np.eye(4) - (ts*self.A)/2), (np.eye(4) + (ts*self.A)/2))
         B = ts*self.B
@@ -158,12 +155,13 @@ class Lateral_LQR_controller(object):
             if abs(P - P_pre).max() < eps:
                 break
             P_pre = P
-        print(i)  # 输出迭代的次数
+        print("黎卡提方程爹迭代次数：", i)  # 输出迭代的次数
 
         self.K = np.linalg.inv(BT @ P @ B + R) @ (BT @ P @ A)
 
-    def cal_error_k_fun(self, ts=0.1):
+    def cal_error_k_fun(self, ts=0.01):
         """
+        计算预测点和规划点的误差
         :param ts: 控制周期
         :param target_path: 规划路径构成的矩阵x, y是直角坐标系下位置， theta是速度方向与x轴夹角，k是路径在该点的曲率
         [(x1, y1, theta_1, k1),
@@ -189,7 +187,10 @@ class Lateral_LQR_controller(object):
         path_length = len(self._target_path)
         min_d = 10000
 
-        for i in range(self.min_index, min(self.min_index + 50, path_length)):
+        # for i in range(self.min_index, min(self.min_index + 50, path_length)):  # 当控制器是根据全局路径进行控制的时候，
+        # 为了缩短匹配点需要记住上一个匹配点位置，前期没有做局部规划，所以可以这样优化
+        for i in range(0, path_length):  # 后面我们的已经做了局部规划的时候，不能再用索引来记录上一个匹配点位置，
+            # 局部路径规划本来长度就短，可以不记录也行；如果想优化，我们可以通过记录绝对时间来实现，用字典类型，每个路径点对应一个绝对时间信息
             d = (self._target_path[i][0] - x) ** 2 + (self._target_path[i][1] - y) ** 2
             if d < min_d:
                 min_d = d
@@ -230,7 +231,7 @@ class Lateral_LQR_controller(object):
         # 10.计算投影点的曲率，近似等于匹配点的曲率
         self.k_r = self._target_path[min_index][3]
         self.e_rr = (e_d, e_d_dao, e_fi, e_fi_dao)
-        print("error:", e_d, e_fi)
+        print("error-e_d-e_fi:", e_d, e_fi)
 
     def forward_control_fun(self):
         """
@@ -284,7 +285,7 @@ class Longitudinal_PID_controller(object):
     引入积分项可以消除稳态误差，但是会引起超调、震荡问题和积分饱和问题
     采用积分分离来克服系统超调和震荡
     """
-    def __init__(self, ego_vehicle,  K_P=1.15, K_I=0.75, K_D=0.35, dt=0.03):
+    def __init__(self, ego_vehicle,  K_P=1.15, K_I=0, K_D=0, dt=0.01):
         """
         采用PID进行纵向控制
         :param ego_vehicle: 控制的车辆， 类型是carla.Vehicle
@@ -326,7 +327,7 @@ class Longitudinal_PID_controller(object):
             differential_error = 0.0
 
         # 积分分离
-        print("absolute error:", abs(error))
+        print("absolute speed error:", abs(error))
         if abs(error) > self.error_threshold:
             # 一旦出现误差大于阈值的情况，积分分离让积分项为0，清除误差缓存区，此时只有比例项发挥作用
             integral_error = 0.0
@@ -386,5 +387,5 @@ class Vehicle_control(object):
         V = self._vehicle.get_velocity()
         V_len = 3.6*math.sqrt(V.x * V.x + V.y * V.y + V.z * V.z)
 
-        print("current speed:", V_len, "current steer:", steering)
+        print("current speed:", V_len, "current steer control:", steering)
         return control
