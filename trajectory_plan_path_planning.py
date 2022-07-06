@@ -1,7 +1,7 @@
 #   -*- coding: utf-8 -*-
 # @Author  : Weilong Zhu
 # @Time    : 2022-05-27,09:18
-# @File    : motion_plan.py
+# @File    : motion_plan_path_planning.py
 
 
 """
@@ -12,29 +12,29 @@ import math
 import numpy as np
 import cvxopt
 import planner_utiles
-
+import time
 """
 首先进行必要的坐标转换
 """
 
 
-def Quadratic_planning(l_min, l_max, dp_path_l, plan_start_l, plan_start_dl, plan_start_ddl,
-                       w_cost_l=5, w_cost_dl=50000, w_cost_ddl=300, w_cost_dddl=15, w_cost_centre=250,
+def Quadratic_planning(l_min, l_max, plan_start_l, plan_start_dl, plan_start_ddl, dp_sampling_res=2,
+                       w_cost_l=250, w_cost_dl=10000, w_cost_ddl=3000, w_cost_dddl=150, w_cost_centre=250,
                        w_cost_end_l=40, w_cost_end_dl=40, w_cost_end_ddl=40,
-                       host_d1=3, host_d2=3, host_w=1.63):
+                       host_d1=3, host_d2=3, host_w=3):
     """
     二次规划实现更加平滑的避障
     :param l_min: 二次规划的上下界
     :param l_max:
-    :param dp_path_l:
     :param plan_start_l: 规划起点的信息
     :param plan_start_dl:
     :param plan_start_ddl:
-    :param w_cost_l: 参考线代价
+    :param dp_sampling_res:  这里是动态规划采用的采样分辨率，作为参数来指导二次规划
+    :param w_cost_l: 参考线代价，使规划的路线向参考线靠近
     :param w_cost_dl: 平滑代价
     :param w_cost_ddl:
     :param w_cost_dddl:
-    :param w_cost_centre: 凸空间中央代价
+    :param w_cost_centre: 凸空间中央代价，使参考线向凸空间中心靠近
     :param w_cost_end_l: 终点的状态代价（希望path的终点状态为（0，0，0））
     :param w_cost_end_dl:
     :param w_cost_end_ddl:
@@ -44,11 +44,11 @@ def Quadratic_planning(l_min, l_max, dp_path_l, plan_start_l, plan_start_dl, pla
     :return: 二次规划得到的轨迹信息qp_path_l, qp_path_dl, qp_path_ddl
     """
     n = len(l_min)
-    print("***************n***********", n)
+    # print("***************n***********", n)
     """等式约束"""
     Aeq = np.zeros(shape=(2 * n - 2, 3 * n))
     beq = np.zeros(shape=(2 * n - 2, 1))
-    ds = 1
+    ds = dp_sampling_res
     Aeq_sub = np.array([[1, ds, ds ** 2 / 2, -1, 0, ds ** 2 / 6],
                         [0, 1, ds / 2, 0, -1, ds / 2]])
     for i in range(n - 1):
@@ -84,7 +84,7 @@ def Quadratic_planning(l_min, l_max, dp_path_l, plan_start_l, plan_start_dl, pla
                            ]])
         b[8*i:8*(i+1), 0] = b_sub
 
-    """生成lb, ub对规划起点做约束"""
+    """生成lb, ub对规划起点和终点做约束"""
     lb = np.ones(shape=(3*n, 1))*(-100000)
     ub = np.ones(shape=(3*n, 1))*100000
     lb[0] = plan_start_l
@@ -94,14 +94,19 @@ def Quadratic_planning(l_min, l_max, dp_path_l, plan_start_l, plan_start_dl, pla
     ub[1] = plan_start_dl
     ub[2] = plan_start_ddl
 
+    lb[3 * n - 1] = 0
+    lb[3 * n - 2] = 0
+    lb[3 * n - 3] = 0
+    ub[3 * n - 1] = 0
+    ub[3 * n - 2] = 0
+    ub[3 * n - 3] = 0
+
     """将起点约束整合到不等式约束中"""
     A_s = np.concatenate((np.identity(3 * n), -np.identity(3 * n)))  # （6n, 3n）
     b_s = np.concatenate((ub, -lb))  # (6n, 1)
     G = np.concatenate((A, A_s))
     h = np.concatenate((b, b_s))
-    # G = A
-    # h = b
-    print("G, h", G.shape, h.shape)
+    # print("G, h", G.shape, h.shape)
 
     """生成H_L, H_DL, H_DDL, H_CENTRE"""
     H_L = np.zeros(shape=(3*n, 3*n))
@@ -133,19 +138,20 @@ def Quadratic_planning(l_min, l_max, dp_path_l, plan_start_l, plan_start_dl, pla
     H = 2*H
     """生成f"""
     f = np.zeros(shape=(3*n, 1))
-    # centre_line = ((np.array(l_min) + np.array(l_max))/2)*(1-0.3) + np.array(dp_path_l)*0.3
+    # 参考线还是选择稳定的，如果以动态规划的dp_path_l为参考线会不稳定
     centre_line = (np.array(l_min) + np.array(l_max))/2
-    # centre_line = dp_path_l
+
     for i in range(n):
         f[3*i] = -2*centre_line[i]
     f = w_cost_centre*f
-    end_l_desire = 0
-    end_dl_desire = 0
-    end_ddl_desire = 0
-    f[3*n-3] = f[3*n-3] - 2*end_l_desire*w_cost_end_l
-    f[3*n-2] = f[3*n-2] - 2*end_dl_desire*w_cost_end_dl
-    f[3*n-1] = f[3*n-1] - 2*end_ddl_desire*w_cost_end_ddl
+    # end_l_desire = 0
+    # end_dl_desire = 0
+    # end_ddl_desire = 0
+    # f[3*n-3] = f[3*n-3] - 2*end_l_desire*w_cost_end_l
+    # f[3*n-2] = f[3*n-2] - 2*end_dl_desire*w_cost_end_dl
+    # f[3*n-1] = f[3*n-1] - 2*end_ddl_desire*w_cost_end_ddl
     """二次规划"""
+    begin_time = time.time()
     cvxopt.solvers.options['show_progress'] = False  # 程序没有问题之后不再输出中间过程
     # 计算时要将输入转化为cvxopt.matrix
     # 该方法返回值是一个字典类型，包含了很多的参数，其中x关键字对应的是优化后的解
@@ -153,13 +159,10 @@ def Quadratic_planning(l_min, l_max, dp_path_l, plan_start_l, plan_start_dl, pla
                             G=cvxopt.matrix(G), h=cvxopt.matrix(h),
                             A=cvxopt.matrix(Aeq), b=cvxopt.matrix(beq)
                             )
-    qp_path_l = []
-    qp_path_dl = []
-    qp_path_ddl = []
-    for i in range(0, len(res['x']), 3):
-        qp_path_l.append(res['x'][i])
-        qp_path_dl.append(res['x'][i+1])
-        qp_path_ddl.append(res['x'][i+2])
+    print("the time cost of cvxopt.solvers.qp", time.time() - begin_time)
+    qp_path_l = res['x'][0::3]
+    qp_path_dl = res['x'][1::3]
+    qp_path_ddl = res['x'][2::3]
     return qp_path_l, qp_path_dl, qp_path_ddl
 
 
@@ -176,27 +179,45 @@ def cal_lmin_lmax(dp_path_s, dp_path_l, obs_s_list, obs_l_list, obs_length, obs_
     """
     lmin = -6 * np.ones(len(dp_path_s))
     lmax = 6 * np.ones(len(dp_path_s))
+    # print("dp_path_s", dp_path_s)
+    # print("obs_s_list", obs_s_list)
     # 先对障碍物进行处理
     for i in range(len(obs_s_list)):
         obs_s_min = obs_s_list[i] - obs_length / 2
         obs_s_max = obs_s_list[i] + obs_length / 2
-        obs_s_min_index = np.argmin(np.abs(np.array(dp_path_s) - obs_s_min))  # 车头的s在动态规划的路径中的投影点索引
-        obs_s_max_index = np.argmin(np.abs(np.array(dp_path_s) - obs_s_max))  # 车尾的s索引
-        centre_index = np.argmin(np.abs(np.array(dp_path_s) - obs_s_list[i]))  # 车辆质心的s索引
-        path_l = dp_path_l[centre_index]  # 质心所在位置的l
+        obs_s_min_index = np.argmin(np.abs(np.array(dp_path_s) - obs_s_min)) + 1  # 车尾的s在动态规划的路径中的投影点索引
+        obs_s_max_index = np.argmin(np.abs(np.array(dp_path_s) - obs_s_max)) + 1  # 车头的s索引
+        """这里采用的计算车辆头部和尾部位置的方法是一种近似，由于动态规划的路径分辨率是sampling_res，所以最大误差是sampling_res/2米
+        *****二次规划的结果中出现了一个比较棘手的问题：障碍物在规划的路径中总是位于避障曲线的右侧，如下图（凸起的曲线就是避障曲线）
+                              。。。。。。。
+                            。           。
+                    。。。。。       <obs> 。。。。。。。
+                    理想情况障碍物应该位于避障曲线的正中心
+                              。。。。。。。
+                            。           。
+                    。。。。。    <car>    。。。。。。。
+        分析原因得到的结果是l的边界约束中， lmin和lmax约束的障碍物偏左，所以导致实际的曲线相对于障碍物偏左
+        解决办法自然是将约束障碍物的边界向右侧调整，由于起点和终点的计算本身存在误差，所以这里也只能大致调整
+        我所选择的策略是车尾向右偏移1个路径分辨率,即索引加1，头部加1的目的是适当扩充右边界，防止车辆离开障碍物的时候过于靠近障碍物
+        """
+
+        print("obs_index", obs_s_min_index, obs_s_max_index)
+        centre_index = np.argmin(np.abs(np.array(dp_path_s) - obs_s_list[i]))  # 车辆质心的s索引，
+        # 就是用来判断障碍物在动态规划路线的哪一侧
+        path_l = dp_path_l[centre_index]  # 质心所在位置的l，就是在障碍物所在的s处dp规划车辆应该处的位置
         if path_l < obs_l_list[i]:
-            """向左绕行"""
+            """障碍物位于规划路线右侧"""
             for j in range(obs_s_min_index, obs_s_max_index + 1):
                 lmax[j] = min(lmax[j], obs_l_list[i] - obs_width / 2)
         else:
-            """向右绕行"""
+            """障碍物位于规划路线左侧"""
             for j in range(obs_s_min_index, obs_s_max_index + 1):
                 lmin[j] = max(lmin[j], obs_l_list[i] + obs_width / 2)
     return lmin, lmax
 
 
 def DP_algorithm(obs_s_list: list, obs_l_list: list,
-                 plan_start_s, plan_start_l, plan_start_dl, plan_start_ddl, sampling_res=1,
+                 plan_start_s, plan_start_l, plan_start_dl, plan_start_ddl, sampling_res=2,
                  w_collision_cost=1e10, w_smooth_cost=[300, 2000, 10000], w_reference_cost=20,
                  row=11, col=5, sample_s=20, sample_l=1.2):
     """  已验证
@@ -217,65 +238,66 @@ def DP_algorithm(obs_s_list: list, obs_l_list: list,
     :param sample_l: 沿着l方向的采样间隔
     :return: 规划的得到的s-l路径信息，dp_path_s, dp_path_l 都是列表类型,不包括规划起点
     """
-    # 声明一个二维数组记录每个采样点的cost,初始化为无穷大
-    cost = np.ones(shape=(row, col)) * np.inf
-    # 声明另一个二维数组，记录规划起点距离当前位置的最短路径的前一个位置
-    pre_node_index = int(row / 2) ** np.ones(shape=(row, col), dtype="int32")
-    # 计算起点到第一列的cost
-    # print("current col: 0")
-    for i in range(row):
-        cost[i][0] = cal_start_cost(obs_s_list, obs_l_list,
-                                    begin_s=plan_start_s, begin_l=plan_start_l,
-                                    begin_dl=plan_start_dl, begin_ddl=plan_start_ddl,
-                                    cur_node_row=i, row=row, sample_s=sample_s, sample_l=sample_l,
-                                    w_cost_collision=w_collision_cost,
-                                    w_cost_smooth=w_smooth_cost,
-                                    w_cost_ref=w_reference_cost)
-    # 计算后面几列的cost
-    for j in range(1, col):
-        # print("current col: %d" % j)
+    if len(obs_s_list):
+        # 声明一个二维数组记录每个采样点的cost,初始化为无穷大
+        cost = np.ones(shape=(row, col)) * np.inf
+        # 声明另一个二维数组，记录规划起点距离当前位置的最短路径的前一个位置
+        pre_node_index = int(row / 2) ** np.ones(shape=(row, col), dtype="int32")
+        # 计算起点到第一列的cost
+        # print("current col: 0")
         for i in range(row):
-            # print("current row: %d" % i)
-            cur_node_s = plan_start_s + (j + 1) * sample_s
-            cur_node_l = ((row + 1) / 2 - 1 - i) * sample_l
+            cost[i][0] = cal_start_cost(obs_s_list, obs_l_list,
+                                        begin_s=plan_start_s, begin_l=plan_start_l,
+                                        begin_dl=plan_start_dl, begin_ddl=plan_start_ddl,
+                                        cur_node_row=i, row=row, sample_s=sample_s, sample_l=sample_l,
+                                        w_cost_collision=w_collision_cost,
+                                        w_cost_smooth=w_smooth_cost,
+                                        w_cost_ref=w_reference_cost)
+        # 计算后面几列的cost
+        for j in range(1, col):
+            # print("current col: %d" % j)
+            for i in range(row):
+                # print("current row: %d" % i)
+                cur_node_s = plan_start_s + (j + 1) * sample_s
+                cur_node_l = ((row + 1) / 2 - 1 - i) * sample_l
 
-            for k in range(row):
-                pre_node_s = plan_start_s + j * sample_s
-                pre_node_l = ((row + 1) / 2 - 1 - k) * sample_l
-                cost_neighbor = cal_neighbor_cost(obs_s_list, obs_l_list, pre_node_s, pre_node_l,
-                                                  cur_node_s=cur_node_s, cur_node_l=cur_node_l, sample_s=sample_s,
-                                                  w_cost_collision=w_collision_cost,
-                                                  w_cost_smooth=w_smooth_cost,
-                                                  w_cost_ref=w_reference_cost)
-                pre_min_cost = cost[k][j - 1]
-                cost_temp = pre_min_cost + cost_neighbor
-                # print(cost_temp)
-                if cost_temp < cost[i][j]:
-                    cost[i][j] = cost_temp
-                    pre_node_index[i][j] = k
-    # 确定最优路径
-    DP_row_index_list = []
-    # print(cost)
-    min_index = cost[0, -1].argmin()
-    if cost[0, -1].min() > w_collision_cost:  # 找不到无碰撞路径，提示运行错误
-        print("********************can't find a feasible path*********************************")
-        # raise RuntimeError("********************can't find a feasible path*********************************")
-    DP_row_index_list.append(min_index)
-    for i in range(col - 1, 0, -1):  # 倒数第二行col-1遍历到第一行1,别把索引提取错了，
-        # DP_row_index_list中第一列记录的是起点的相对位置，是车辆已经通过的位置，不在路径考虑的范围内
-        # print(min_index)
-        min_index = pre_node_index[min_index][i]
+                for k in range(row):
+                    pre_node_s = plan_start_s + j * sample_s
+                    pre_node_l = ((row + 1) / 2 - 1 - k) * sample_l
+                    cost_neighbor = cal_neighbor_cost(obs_s_list, obs_l_list, pre_node_s, pre_node_l,
+                                                      cur_node_s=cur_node_s, cur_node_l=cur_node_l, sample_s=sample_s,
+                                                      w_cost_collision=w_collision_cost,
+                                                      w_cost_smooth=w_smooth_cost,
+                                                      w_cost_ref=w_reference_cost)
+                    pre_min_cost = cost[k][j - 1]
+                    cost_temp = pre_min_cost + cost_neighbor
+                    # print(cost_temp)
+                    if cost_temp < cost[i][j]:
+                        cost[i][j] = cost_temp
+                        pre_node_index[i][j] = k
+        # 确定最优路径
+        DP_row_index_list = []
+        # print(cost)
+        min_index = cost[0, -1].argmin()
+        if cost[0, -1].min() > w_collision_cost:  # 找不到无碰撞路径，提示运行错误
+            print("********************can't find a feasible path*********************************")
+            # raise RuntimeError("********************can't find a feasible path*********************************")
         DP_row_index_list.append(min_index)
-    DP_row_index_list.reverse()
-    # print("**********************************************************************************************")
-    # print(DP_row_index_list)
+        for i in range(col - 1, 0, -1):  # 倒数第二行col-1遍历到第一行1,别把索引提取错了，
+            # DP_row_index_list中第一列记录的是起点的相对位置，是车辆已经通过的位置，不在路径考虑的范围内
+            # print(min_index)
+            min_index = pre_node_index[min_index][i]
+            DP_row_index_list.append(min_index)
+        DP_row_index_list.reverse()
+    else:  # 没有障碍物的情况，理想路径就是l=0的一系列点
+        DP_row_index_list = list(np.ones(col)*((row + 1) / 2 - 1))
     # 将数组中的索引转化为s-l
     DP_s_list = []
     DP_l_list = []
     for i in range(len(DP_row_index_list)):
         DP_s_list.append(plan_start_s + (i + 1) * sample_s)
         DP_l_list.append(((row + 1) / 2 - 1 - DP_row_index_list[i]) * sample_l)
-    # 初步的动态规划密度不够，相邻点之间在五次多项式的基础上间隔一米进行采样
+    # 初步的动态规划密度不够，相邻点之间在五次多项式的基础上间隔sampling_res米进行采样
     enriched_dp_s, enriched_dp_l = enrich_DP_s_l(DP_s_list, DP_l_list,
                                                  plan_start_s, plan_start_l, plan_start_dl, plan_start_ddl,
                                                  resolution=sampling_res)
@@ -313,11 +335,13 @@ def enrich_DP_s_l(DP_s_list, DP_l_list, plan_start_s, plan_start_l, plan_start_d
     #     l[i] = coeffi[0] + coeffi[1]*s[i] + coeffi[2]*(s[i]**2) + \
     #            coeffi[3]*(s[i]**3) + coeffi[4]*(s[i]**4) + coeffi[5]*(s[i]**5)
     """下面用矩阵运算，加快速度"""
-    s = start_s + np.arange(0, int(end_s - start_s), resolution)  # 采样间隔为一米时， 采样的个数就是终点和起点的差值取整
+    # 考虑规划起点
+    s = start_s + np.arange(0, int(end_s - start_s), resolution)  # 采样间隔为resolution米时， 采样的个数就是终点和起点的差值取整
     l = coeffi[0] + coeffi[1] * s + coeffi[2] * (s ** 2) + coeffi[3] * (s ** 3) + coeffi[4] * (s ** 4) + coeffi[5] * (
                 s ** 5)
     enriched_s_list = enriched_s_list + list(s)
     enriched_l_list = enriched_l_list + list(l)
+    # 规划起点后的其他点
     for i in range(1, len(DP_s_list)):
         start_s = DP_s_list[i - 1]
         start_l = DP_l_list[i - 1]
@@ -414,6 +438,8 @@ def cal_start_cost(obs_s_list, obs_l_list,
         # 但是考虑量采样点之间的五次多项式一般较平缓，我们就直接近似，简化计算
         # print(square_d)
         cost_collision += cal_obs_cost(w_cost_collision, square_d)
+        if cost_collision > cost_collision:
+            break
 
     return cost_smooth + cost_collision + cost_ref
 
@@ -489,7 +515,7 @@ def cal_neighbor_cost(obs_s_list, obs_l_list, pre_node_s, pre_node_l,
     return cost_smooth + cost_collision + cost_ref
 
 
-def cal_obs_cost(w_cost_collision, square_d: np.ndarray):
+def cal_obs_cost(w_cost_collision, square_d: np.ndarray, danger_dis=3, safe_dis=5):
     """  已验证
     计算障碍物的代价
     暂时设定为四米意外，不会碰撞
@@ -497,15 +523,18 @@ def cal_obs_cost(w_cost_collision, square_d: np.ndarray):
     三米以内w_cost_collision
     :param w_cost_collision: 障碍物碰撞的代价系数
     :param square_d: 障碍物与五次多项式上离散点的距离， np.array类型shape=(10,1)
+    :param danger_dis: 障碍物与五次多项式上离散点的距离， np.array类型shape=(10,1)
+    :param safe_dis: 障碍物与五次多项式上离散点的距离， np.array类型shape=(10,1)
+
     :return: 障碍物的代价
     """
     cost = 0
     for s_d in square_d.squeeze():
-        if s_d <= 9:
+        if s_d <= danger_dis**2:
             # print("collision", "^^^^^^^^^^^^^^^^^^^^")
             cost += w_cost_collision
             break
-        elif 9 < s_d < 25:
+        elif danger_dis**2 < s_d < safe_dis**2:
             # print("danger range", "^^^^^^^^^^^^^^^^^^^^")
             cost += 5000 / s_d
     return cost
@@ -594,6 +623,8 @@ def cal_proj_point(s, pre_match_index, frenet_path_opt: list, s_map: list):
     start_s_match_index = pre_match_index
     while s_map[start_s_match_index + 1] < s:  # 这里存在一点问题，如果动态规划采样点过长，会超出s_map的范围
         start_s_match_index += 1
+        # if start_s_match_index == (len(s_map) - 1):
+        #     break
     mp_x, mp_y, mp_theta, mp_kappa = frenet_path_opt[start_s_match_index]  # 取出投影点的路径信息
     ds = s - s_map[start_s_match_index]  # 计算规划起点的投影点和匹配点之间的弧长
     mp_tou_v = np.array([math.cos(mp_theta), math.sin(mp_theta)])
