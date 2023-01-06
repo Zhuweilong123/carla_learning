@@ -11,6 +11,7 @@ the necessary functions of path planner based on S-L graph are realized
 SL_planning_test.py is used to test my path planner.
 
 The version of necessary software :
+
 CARLA Version: 0.9.12
 
 PYTHON Version: 3.8.12
